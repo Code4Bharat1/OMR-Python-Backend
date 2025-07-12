@@ -1,37 +1,50 @@
-FROM python:3.11-slim
+# Use Python 3.9 slim image as base
+FROM python:3.9-slim
 
-# Install system dependencies
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies required for OpenCV and image processing
 RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
     libxrender-dev \
     libgomp1 \
-    libgthread-2.0-0 \
-    libfontconfig1 \
-    libgtk-3-0 \
     libgl1-mesa-glx \
+    libglib2.0-0 \
+    libgtk-3-0 \
+    libavcodec-dev \
+    libavformat-dev \
+    libswscale-dev \
+    libv4l-dev \
+    libxvidcore-dev \
+    libx264-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libtiff-dev \
+    libatlas-base-dev \
+    gfortran \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /app
-
-# Copy requirements first for better caching
+# Copy requirements file
 COPY requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application files
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p uploads logs
+RUN mkdir -p uploads logs templates static
 
 # Set environment variables
 ENV FLASK_APP=app.py
 ENV FLASK_ENV=production
-ENV PYTHONPATH=/app
+ENV FLASK_DEBUG=false
+ENV PYTHONUNBUFFERED=1
 
 # Expose port
 EXPOSE 5000
@@ -40,5 +53,9 @@ EXPOSE 5000
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Run the application
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--timeout", "60", "app:app"]
+# Health check - updated to use the correct endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:5000/api/health || exit 1
+
+# Run the application with Waitress for production
+CMD ["python", "wsgi.py"]

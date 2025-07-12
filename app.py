@@ -1,4 +1,5 @@
-from flask import Flask, request, render_template, redirect, url_for, send_file, flash
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
 import cv2
 import numpy as np
 import io
@@ -11,12 +12,15 @@ import math
 import logging
 from logging.handlers import RotatingFileHandler
 import secrets
+import uuid
+import base64
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for Next.js frontend
 
 # Production configuration
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(16))
@@ -29,7 +33,7 @@ UPLOAD_FOLDER = app.config['UPLOAD_FOLDER']
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # Setup logging for production
-if not app.debug:
+if not app.config['DEBUG']:
     if not os.path.exists('logs'):
         os.mkdir('logs')
     file_handler = RotatingFileHandler('logs/omr_app.log', maxBytes=10240, backupCount=10)
@@ -505,110 +509,162 @@ def process_omr_enhanced(image_bytes):
         logger.error(f"Error processing OMR: {str(e)}")
         raise ValueError(f"Error processing OMR: {str(e)}")
 
-# Error handlers
-@app.errorhandler(413)
-def too_large(e):
-    flash('File too large. Please upload a file smaller than 16MB.')
-    return redirect(url_for('index'))
-
-@app.errorhandler(500)
-def internal_server_error(e):
-    logger.error(f"Internal server error: {e}")
-    flash('An internal error occurred. Please try again.')
-    return redirect(url_for('index'))
-
-@app.route('/health')
+# API Routes
+@app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint for monitoring"""
-    return {'status': 'healthy', 'service': 'OMR Processing'}, 200
+    return jsonify({'status': 'healthy', 'service': 'OMR Processing API'}), 200
 
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    if request.method == 'POST':
+@app.route('/api/process-omr', methods=['POST'])
+def process_omr_api():
+    """
+    API endpoint to process OMR sheets
+    Expects: multipart/form-data with 'omrfile' field
+    Returns: JSON with results, summary, and base64 encoded processed image
+    """
+    try:
+        # Check if file is in request
         if 'omrfile' not in request.files:
-            flash('No file part')
-            return redirect(request.url)
+            return jsonify({'error': 'No file provided'}), 400
         
         file = request.files['omrfile']
         if file.filename == '':
-            flash('No selected file')
-            return redirect(request.url)
+            return jsonify({'error': 'No file selected'}), 400
         
         # Validate file type
         allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff'}
         if not ('.' in file.filename and file.filename.rsplit('.', 1)[1].lower() in allowed_extensions):
-            flash('Invalid file type. Please upload an image file.')
-            return redirect(request.url)
+            return jsonify({'error': 'Invalid file type. Please upload an image file.'}), 400
         
-        try:
-            image_bytes = file.read()
-            
-            # Process with enhanced detection
-            results, img_bytes, total_questions_processed = process_omr_enhanced(image_bytes)
-            
-            # Save files with unique names to prevent conflicts
-            import uuid
-            unique_id = str(uuid.uuid4())[:8]
-            
-            out_path = os.path.join(UPLOAD_FOLDER, f'annotated_{unique_id}.png')
-            with open(out_path, 'wb') as f:
-                f.write(img_bytes)
-            
-            json_path = os.path.join(UPLOAD_FOLDER, f'results_{unique_id}.json')
-            with open(json_path, 'w') as f:
-                json.dump(results, f, indent=2)
-            
-            # Generate summary
-            marked_bubbles = len(results)
-            questions_answered = len(set(r['question'] for r in results))
-            expected_questions = 180
-            
-            completion_rate = (questions_answered / expected_questions) * 100
-            detection_rate = (total_questions_processed / expected_questions) * 100
-            
-            summary = {
-                'total_questions_processed': int(total_questions_processed),
-                'marked_bubbles': int(marked_bubbles),
-                'questions_answered': int(questions_answered),
-                'expected_questions': expected_questions,
-                'unanswered_questions': int(expected_questions - questions_answered),
-                'completion_rate': f"{completion_rate:.1f}%",
-                'detection_rate': f"{detection_rate:.1f}%",
-                'processing_method': "Enhanced Detection with Skew Correction",
-                'accuracy_score': f"{min(100, detection_rate):.1f}%"
-            }
-            
-            logger.info(f"Successfully processed OMR: {summary}")
-            
-            return render_template('result.html',
-                                 results=results,
-                                 summary=summary,
-                                 image_url=url_for('uploaded_file', filename=f'annotated_{unique_id}.png'),
-                                 json_url=url_for('uploaded_file', filename=f'results_{unique_id}.json'))
+        # Read image bytes
+        image_bytes = file.read()
         
-        except Exception as e:
-            logger.error(f"Error processing file: {str(e)}")
-            flash(f"Error processing file: {str(e)}")
-            return redirect(request.url)
-    
-    return render_template('index.html')
-
-@app.route('/uploads/<filename>')
-def uploaded_file(filename):
-    try:
-        file_path = os.path.join(UPLOAD_FOLDER, filename)
-        if not os.path.exists(file_path):
-            return "File not found", 404
-            
-        if filename.endswith('.json'):
-            return send_file(file_path, mimetype='application/json')
-        else:
-            return send_file(file_path, mimetype='image/png')
+        # Process with enhanced detection
+        results, img_bytes, total_questions_processed = process_omr_enhanced(image_bytes)
+        
+        # Generate summary
+        marked_bubbles = len(results)
+        questions_answered = len(set(r['question'] for r in results))
+        expected_questions = 180
+        
+        completion_rate = (questions_answered / expected_questions) * 100
+        detection_rate = (total_questions_processed / expected_questions) * 100
+        
+        summary = {
+            'total_questions_processed': int(total_questions_processed),
+            'marked_bubbles': int(marked_bubbles),
+            'questions_answered': int(questions_answered),
+            'expected_questions': expected_questions,
+            'unanswered_questions': int(expected_questions - questions_answered),
+            'completion_rate': f"{completion_rate:.1f}%",
+            'detection_rate': f"{detection_rate:.1f}%",
+            'processing_method': "Enhanced Detection with Skew Correction",
+            'accuracy_score': f"{min(100, detection_rate):.1f}%"
+        }
+        
+        # Convert processed image to base64
+        processed_image_base64 = base64.b64encode(img_bytes).decode('utf-8')
+        
+        logger.info(f"Successfully processed OMR API request: {summary}")
+        
+        return jsonify({
+            'success': True,
+            'results': results,
+            'summary': summary,
+            'processed_image': processed_image_base64,
+            'message': 'OMR sheet processed successfully'
+        }), 200
+        
     except Exception as e:
-        logger.error(f"Error serving file {filename}: {e}")
-        return "Error serving file", 500
+        logger.error(f"Error processing OMR API request: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'message': 'Failed to process OMR sheet'
+        }), 500
+
+@app.route('/api/process-omr-base64', methods=['POST'])
+def process_omr_base64():
+    """
+    API endpoint to process OMR sheets from base64 encoded images
+    Expects: JSON with 'image' field containing base64 encoded image
+    Returns: JSON with results, summary, and base64 encoded processed image
+    """
+    try:
+        # Check if JSON data is provided
+        if not request.is_json:
+            return jsonify({'error': 'Request must be JSON'}), 400
+        
+        data = request.get_json()
+        
+        if 'image' not in data:
+            return jsonify({'error': 'No image data provided'}), 400
+        
+        # Decode base64 image
+        try:
+            image_data = data['image']
+            # Remove data URL prefix if present
+            if 'data:' in image_data and ';base64,' in image_data:
+                image_data = image_data.split(';base64,')[1]
+            
+            image_bytes = base64.b64decode(image_data)
+        except Exception as e:
+            return jsonify({'error': 'Invalid base64 image data'}), 400
+        
+        # Process with enhanced detection
+        results, img_bytes, total_questions_processed = process_omr_enhanced(image_bytes)
+        
+        # Generate summary
+        marked_bubbles = len(results)
+        questions_answered = len(set(r['question'] for r in results))
+        expected_questions = 180
+        
+        completion_rate = (questions_answered / expected_questions) * 100
+        detection_rate = (total_questions_processed / expected_questions) * 100
+        
+        summary = {
+            'total_questions_processed': int(total_questions_processed),
+            'marked_bubbles': int(marked_bubbles),
+            'questions_answered': int(questions_answered),
+            'expected_questions': expected_questions,
+            'unanswered_questions': int(expected_questions - questions_answered),
+            'completion_rate': f"{completion_rate:.1f}%",
+            'detection_rate': f"{detection_rate:.1f}%",
+            'processing_method': "Enhanced Detection with Skew Correction",
+            'accuracy_score': f"{min(100, detection_rate):.1f}%"
+        }
+        
+        # Convert processed image to base64
+        processed_image_base64 = base64.b64encode(img_bytes).decode('utf-8')
+        
+        logger.info(f"Successfully processed OMR base64 API request: {summary}")
+        
+        return jsonify({
+            'success': True,
+            'results': results,
+            'summary': summary,
+            'processed_image': processed_image_base64,
+            'message': 'OMR sheet processed successfully'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error processing OMR base64 API request: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'message': 'Failed to process OMR sheet'
+        }), 500
 
 if __name__ == '__main__':
-    # Production server should use a proper WSGI server like Gunicorn
+    # Get configuration from environment variables
+    host = os.environ.get('HOST', '0.0.0.0')
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=app.config['DEBUG'])
+    debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    
+    # Only use Flask's development server when running directly
+    if debug:
+        app.run(host=host, port=port, debug=debug)
+    else:
+        print("WARNING: Running in production mode. Please use 'python wsgi.py' instead of 'python app.py'")
+        print("For development, set FLASK_DEBUG=true")
+        app.run(host=host, port=port, debug=False)
