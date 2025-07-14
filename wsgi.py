@@ -23,7 +23,7 @@ def create_production_server():
     """
     # Get configuration from environment variables
     host = os.environ.get('HOST', '0.0.0.0')
-    port = int(os.environ.get('PORT', 8000))
+    port = int(os.environ.get('PORT', 6001))
     threads = int(os.environ.get('WAITRESS_THREADS', 4))
     
     # Additional Waitress configuration

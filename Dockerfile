@@ -55,7 +55,7 @@ USER appuser
 
 # Health check - updated to use the correct endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
+    CMD curl -f https://omr.neet720.com/api/health || exit 1
 
 # Run the application with Waitress for production
 CMD ["python", "wsgi.py"]

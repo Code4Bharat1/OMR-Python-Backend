@@ -667,7 +667,7 @@ def process_omr_base64():
 if __name__ == '__main__':
     # Get configuration from environment variables
     host = os.environ.get('HOST', '0.0.0.0')
-    port = int(os.environ.get('PORT', 8000))
+    port = int(os.environ.get('PORT', 6001))
     debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
     
     print(f"Starting Flask OMR Application on {host}:{port}")
