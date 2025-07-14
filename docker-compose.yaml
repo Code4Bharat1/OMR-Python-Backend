@@ -4,12 +4,12 @@ services:
   omr-api:
     build: .
     ports:
-      - "8000:8000"
+      - "6001:6001"
     environment:
       - FLASK_ENV=production
       - FLASK_DEBUG=false
       - HOST=0.0.0.0
-      - PORT=8000
+      - PORT=6001
       - WAITRESS_THREADS=4
       - WAITRESS_CONNECTION_LIMIT=1000
       - WAITRESS_CLEANUP_INTERVAL=30
@@ -42,12 +42,12 @@ services:
   omr-api-dev:
     build: .
     ports:
-      - "8000:8000"
+      - "6001:6001"
     environment:
       - FLASK_ENV=development
       - FLASK_DEBUG=true
       - HOST=0.0.0.0
-      - PORT=8000
+      - PORT=6001
       - PYTHONUNBUFFERED=1
     volumes:
       - .:/app  # Mount source code for development
