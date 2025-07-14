@@ -47,7 +47,7 @@ ENV FLASK_DEBUG=false
 ENV PYTHONUNBUFFERED=1
 
 # Expose port
-EXPOSE 5000
+EXPOSE 8000
 
 # Create a non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
@@ -55,7 +55,7 @@ USER appuser
 
 # Health check - updated to use the correct endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:5000/api/health || exit 1
+    CMD curl -f http://localhost:8000/api/health || exit 1
 
 # Run the application with Waitress for production
 CMD ["python", "wsgi.py"]

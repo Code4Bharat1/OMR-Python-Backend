@@ -7,7 +7,7 @@ This file serves as the production entry point for the OMR Flask application
 import os
 import logging
 from waitress import serve
-from paste.txt import main as app  # Import your Flask app
+from app import app  # ✅ Make sure this points to your Flask instance
 
 # Configure logging for production
 logging.basicConfig(
@@ -23,7 +23,7 @@ def create_production_server():
     """
     # Get configuration from environment variables
     host = os.environ.get('HOST', '0.0.0.0')
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 8000))
     threads = int(os.environ.get('WAITRESS_THREADS', 4))
     
     # Additional Waitress configuration
@@ -34,7 +34,7 @@ def create_production_server():
     logger.info(f"Starting production server on {host}:{port}")
     logger.info(f"Configuration: threads={threads}, connection_limit={connection_limit}")
     
-    # Start the Waitress server
+    # ✅ Correctly indented serve() call
     serve(
         app,
         host=host,
@@ -43,13 +43,10 @@ def create_production_server():
         connection_limit=connection_limit,
         cleanup_interval=cleanup_interval,
         channel_timeout=channel_timeout,
-        # Security and performance settings
         max_request_header_size=8192,
-        max_request_body_size=20971520,  # 20MB (slightly higher than Flask's 16MB)
-        # Logging
-        _quiet=False,
-        _debug=False
+        max_request_body_size=20 * 1024 * 1024  # 20MB
     )
 
 if __name__ == '__main__':
     create_production_server()
+ 

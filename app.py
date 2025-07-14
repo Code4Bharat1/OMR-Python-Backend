@@ -14,6 +14,15 @@ from logging.handlers import RotatingFileHandler
 import secrets
 import uuid
 import base64
+import platform
+
+# Only import portalocker and fcntl on non-Windows systems
+if platform.system() != 'Windows':
+    try:
+        import portalocker
+        import fcntl
+    except ImportError:
+        pass
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -658,13 +667,12 @@ def process_omr_base64():
 if __name__ == '__main__':
     # Get configuration from environment variables
     host = os.environ.get('HOST', '0.0.0.0')
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 8000))
     debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
     
-    # Only use Flask's development server when running directly
-    if debug:
-        app.run(host=host, port=port, debug=debug)
-    else:
-        print("WARNING: Running in production mode. Please use 'python wsgi.py' instead of 'python app.py'")
-        print("For development, set FLASK_DEBUG=true")
-        app.run(host=host, port=port, debug=False)
+    print(f"Starting Flask OMR Application on {host}:{port}")
+    print(f"Platform: {platform.system()}")
+    print(f"Debug mode: {debug}")
+    
+    # Use Flask's built-in server (works on all platforms)
+  #  app.run(host=host, port=port, debug=debug)
