@@ -42,7 +42,7 @@ services:
   omr-api-dev:
     build: .
     ports:
-      - "5001:5000"
+      - "8000:8000"
     environment:
       - FLASK_ENV=development
       - FLASK_DEBUG=true
