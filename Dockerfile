@@ -47,7 +47,7 @@ ENV FLASK_DEBUG=false
 ENV PYTHONUNBUFFERED=1
 
 # Expose port
-EXPOSE 8000
+EXPOSE 6001
 
 # Create a non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
