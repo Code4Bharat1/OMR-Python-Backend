@@ -52,6 +52,7 @@ if not app.config['DEBUG']:
     file_handler.setLevel(logging.INFO)
     app.logger.addHandler(file_handler)
     app.logger.setLevel(logging.INFO)
+    
     app.logger.info('OMR Application startup')
 def detect_scanners():
     """
