@@ -52,7 +52,7 @@ if not app.config['DEBUG']:
     file_handler.setLevel(logging.INFO)
     app.logger.addHandler(file_handler)
     app.logger.setLevel(logging.INFO)
-    
+
     app.logger.info('OMR Application startup')
 def detect_scanners():
     """
@@ -517,7 +517,8 @@ def detect_and_correct_skew(image):
 
 def enhanced_bubble_detection(image):
     """
-    Enhanced bubble detection to ensure all 180 questions are found
+    Enhanced bubble detection to ensure all 180 questions are found,
+    now with QR region filter to ignore circles inside QR code area.
     """
     try:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -559,9 +560,25 @@ def enhanced_bubble_detection(image):
                     break
             if not is_duplicate:
                 unique_circles.append(circle)
-        
-        logger.info(f"Enhanced detection found {len(unique_circles)} unique circles")
-        return unique_circles
+
+        # === QR FILTER LOGIC STARTS HERE ===
+        # Define QR region (top-right box). Adjust if your QR moves/size changes.
+        height, width = image.shape[:2]
+        qr_box_width = 230  # width of QR area in px (tune as needed)
+        qr_box_height = 230 # height of QR area in px (tune as needed)
+        qr_left = width - qr_box_width
+        qr_top = 0
+        qr_right = width
+        qr_bottom = qr_box_height
+
+        filtered_circles = []
+        for x, y, r in unique_circles:
+            # Keep if outside QR area
+            if not (qr_left <= x <= qr_right and qr_top <= y <= qr_bottom):
+                filtered_circles.append((x, y, r))
+            # else: print(f"Filtered: {x},{y} (possible QR bubble)")
+        logger.info(f"Enhanced detection found {len(filtered_circles)} unique circles (after QR filter)")
+        return filtered_circles
     
     except Exception as e:
         logger.error(f"Error in bubble detection: {e}")
