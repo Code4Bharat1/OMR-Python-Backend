@@ -53,6 +53,259 @@ if not app.config['DEBUG']:
     app.logger.addHandler(file_handler)
     app.logger.setLevel(logging.INFO)
     app.logger.info('OMR Application startup')
+def detect_scanners():
+    """
+    Detect available scanners on the system
+    Returns a list of scanner information
+    """
+    scanners = []
+    
+    try:
+        # Windows TWAIN scanner detection
+        if platform.system() == 'Windows' and TWAIN_AVAILABLE:
+            try:
+                sm = twain.SourceManager(0)
+                sources = sm.GetSourceList()
+                
+                for source_name in sources:
+                    try:
+                        source = sm.OpenSource(source_name)
+                        caps = source.GetCapability(twain.ICAP_SUPPORTEDSIZES)
+                        
+                        scanner_info = {
+                            'id': len(scanners),
+                            'name': source_name,
+                            'driver': 'TWAIN',
+                            'platform': 'Windows',
+                            'status': 'Available',
+                            'supported_formats': ['JPEG', 'PNG', 'TIFF', 'BMP'],
+                            'max_resolution': 600,  # Default assumption
+                            'color_modes': ['Color', 'Grayscale', 'Black & White'],
+                            'paper_sizes': ['A4', 'Letter', 'Legal', 'Custom']
+                        }
+                        
+                        # Try to get more detailed capabilities
+                        try:
+                            resolution_caps = source.GetCapability(twain.ICAP_XRESOLUTION)
+                            if resolution_caps:
+                                scanner_info['max_resolution'] = max(resolution_caps)
+                        except:
+                            pass
+                        
+                        scanners.append(scanner_info)
+                        source.RequestAcquire(0, 0)  # Close source
+                        
+                    except Exception as e:
+                        logger.warning(f"Could not get details for scanner {source_name}: {e}")
+                        # Add basic info even if details fail
+                        scanners.append({
+                            'id': len(scanners),
+                            'name': source_name,
+                            'driver': 'TWAIN',
+                            'platform': 'Windows',
+                            'status': 'Available',
+                            'supported_formats': ['JPEG', 'PNG'],
+                            'max_resolution': 300,
+                            'color_modes': ['Color', 'Grayscale'],
+                            'paper_sizes': ['A4', 'Letter']
+                        })
+                
+            except Exception as e:
+                logger.error(f"TWAIN scanner detection failed: {e}")
+        
+        # Linux SANE scanner detection
+        if platform.system() == 'Linux' and SANE_AVAILABLE:
+            try:
+                sane.init()
+                devices = sane.get_devices()
+                
+                for device in devices:
+                    try:
+                        dev_name, manufacturer, model, dev_type = device
+                        
+                        scanner_info = {
+                            'id': len(scanners),
+                            'name': f"{manufacturer} {model}",
+                            'device_name': dev_name,
+                            'manufacturer': manufacturer,
+                            'model': model,
+                            'type': dev_type,
+                            'driver': 'SANE',
+                            'platform': 'Linux',
+                            'status': 'Available',
+                            'supported_formats': ['JPEG', 'PNG', 'TIFF', 'PNM'],
+                            'max_resolution': 600,
+                            'color_modes': ['Color', 'Grayscale', 'Lineart'],
+                            'paper_sizes': ['A4', 'Letter', 'Legal', 'Custom']
+                        }
+                        
+                        # Try to open device to get more details
+                        try:
+                            dev = sane.open(dev_name)
+                            opts = dev.get_options()
+                            
+                            # Extract resolution info
+                            for opt in opts:
+                                if opt and 'resolution' in opt.name.lower():
+                                    if hasattr(opt, 'constraint') and opt.constraint:
+                                        if isinstance(opt.constraint, (list, tuple)):
+                                            scanner_info['max_resolution'] = max(opt.constraint)
+                                        elif isinstance(opt.constraint, (int, float)):
+                                            scanner_info['max_resolution'] = opt.constraint
+                            
+                            dev.close()
+                            
+                        except Exception as e:
+                            logger.warning(f"Could not get detailed info for {dev_name}: {e}")
+                        
+                        scanners.append(scanner_info)
+                        
+                    except Exception as e:
+                        logger.warning(f"Error processing SANE device {device}: {e}")
+                
+                sane.exit()
+                
+            except Exception as e:
+                logger.error(f"SANE scanner detection failed: {e}")
+        
+        # macOS scanner detection (basic)
+        if platform.system() == 'Darwin':
+            try:
+                # Check for common scanner applications/drivers
+                import subprocess
+                
+                # Try to detect scanners through system_profiler
+                result = subprocess.run(['system_profiler', 'SPUSBDataType'], 
+                                      capture_output=True, text=True, timeout=10)
+                
+                if result.returncode == 0:
+                    lines = result.stdout.split('\n')
+                    for line in lines:
+                        if any(keyword in line.lower() for keyword in ['scanner', 'scan', 'canon', 'epson', 'hp']):
+                            if 'scanner' in line.lower() or 'scan' in line.lower():
+                                scanner_name = line.strip().split(':')[0] if ':' in line else line.strip()
+                                
+                                scanner_info = {
+                                    'id': len(scanners),
+                                    'name': scanner_name,
+                                    'driver': 'System',
+                                    'platform': 'macOS',
+                                    'status': 'Available',
+                                    'supported_formats': ['JPEG', 'PNG', 'TIFF', 'PDF'],
+                                    'max_resolution': 600,
+                                    'color_modes': ['Color', 'Grayscale'],
+                                    'paper_sizes': ['A4', 'Letter', 'Legal']
+                                }
+                                scanners.append(scanner_info)
+                
+            except Exception as e:
+                logger.warning(f"macOS scanner detection failed: {e}")
+        
+    except Exception as e:
+        logger.error(f"Scanner detection failed: {e}")
+    
+    return scanners
+
+def scan_document(scanner_id, scan_settings=None):
+    """
+    Scan a document using the specified scanner
+    Returns the scanned image as bytes
+    """
+    try:
+        scanners = detect_scanners()
+        
+        if scanner_id >= len(scanners):
+            raise ValueError(f"Invalid scanner ID: {scanner_id}")
+        
+        scanner = scanners[scanner_id]
+        
+        # Default scan settings
+        default_settings = {
+            'resolution': 300,
+            'color_mode': 'Color',
+            'paper_size': 'A4',
+            'format': 'JPEG',
+            'brightness': 50,
+            'contrast': 50
+        }
+        
+        if scan_settings:
+            default_settings.update(scan_settings)
+        
+        logger.info(f"Scanning with {scanner['name']} using settings: {default_settings}")
+        
+        # Windows TWAIN scanning
+        if platform.system() == 'Windows' and TWAIN_AVAILABLE and scanner['driver'] == 'TWAIN':
+            try:
+                sm = twain.SourceManager(0)
+                source = sm.OpenSource(scanner['name'])
+                
+                # Set scan parameters
+                source.SetCapability(twain.ICAP_XRESOLUTION, default_settings['resolution'])
+                source.SetCapability(twain.ICAP_YRESOLUTION, default_settings['resolution'])
+                
+                # Set color mode
+                if default_settings['color_mode'] == 'Color':
+                    source.SetCapability(twain.ICAP_PIXELTYPE, twain.TWPT_RGB)
+                elif default_settings['color_mode'] == 'Grayscale':
+                    source.SetCapability(twain.ICAP_PIXELTYPE, twain.TWPT_GRAY)
+                else:
+                    source.SetCapability(twain.ICAP_PIXELTYPE, twain.TWPT_BW)
+                
+                # Perform scan
+                source.RequestAcquire(0, 0)
+                rv = source.XferImageNatively()
+                
+                if rv:
+                    (handle, count) = rv
+                    # Convert handle to image bytes
+                    # This is a simplified version - actual implementation depends on TWAIN library
+                    image_data = twain.DIBToBMFile(handle)
+                    twain.GlobalFree(handle)
+                    return image_data
+                
+            except Exception as e:
+                logger.error(f"TWAIN scanning failed: {e}")
+                raise ValueError(f"Scanning failed: {e}")
+        
+        # Linux SANE scanning
+        if platform.system() == 'Linux' and SANE_AVAILABLE and scanner['driver'] == 'SANE':
+            try:
+                sane.init()
+                device = sane.open(scanner['device_name'])
+                
+                # Set scan parameters
+                device.resolution = default_settings['resolution']
+                
+                if default_settings['color_mode'] == 'Color':
+                    device.mode = 'color'
+                elif default_settings['color_mode'] == 'Grayscale':
+                    device.mode = 'gray'
+                else:
+                    device.mode = 'lineart'
+                
+                # Perform scan
+                device.start()
+                image_data = device.snap()
+                device.close()
+                sane.exit()
+                
+                # Convert PIL image to bytes
+                if isinstance(image_data, Image.Image):
+                    img_byte_arr = io.BytesIO()
+                    image_data.save(img_byte_arr, format=default_settings['format'])
+                    return img_byte_arr.getvalue()
+                
+            except Exception as e:
+                logger.error(f"SANE scanning failed: {e}")
+                raise ValueError(f"Scanning failed: {e}")
+        
+        # If no specific driver worked, return error
+        raise ValueError(f"Scanning not supported for {scanner['driver']} on {platform.system()}")
+        
+    except Exception as e:
+        logger.error(f"Document scanning failed: {e}")
+        raise ValueError(f"Document scanning failed: {e}")
 
 def detect_and_correct_skew(image):
     """
@@ -605,6 +858,38 @@ def process_omr_sheet():
         return jsonify({'success': False, 'error': str(e), 'message': 'Failed to process student/question OMR'}), 500
 
 
+@app.route('/api/scanners', methods=['GET'])
+def list_scanners():
+    try:
+        scanners = detect_scanners()
+        return jsonify({'success': True, 'scanners': scanners}), 200
+    except Exception as e:
+        logger.error(f"Error detecting scanners: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+    
+@app.route('/api/scan_qr', methods=['POST'])
+def scan_qr():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'No file uploaded'}), 400
+
+        file = request.files['file']
+        file_bytes = np.frombuffer(file.read(), np.uint8)
+        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+        # Use OpenCV QRCodeDetector
+        detector = cv2.QRCodeDetector()
+        data, bbox, _ = detector.detectAndDecode(img)
+
+        if data:
+            return jsonify({'success': True, 'qr_data': data}), 200
+        else:
+            return jsonify({'success': False, 'error': 'No QR code detected'}), 200
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 
 @app.route('/api/process-omr', methods=['POST'])
 def process_omr_api():
@@ -747,14 +1032,23 @@ def process_omr_base64():
         }), 500
 
 if __name__ == '__main__':
-    # Get configuration from environment variables
+    # Print detected scanners on startup
+    scanners = detect_scanners()
+    print("Detected scanners:", scanners)
+
+    # Or, to test scanning a document with scanner ID 0
+    # (Be careful: this actually triggers a scan if a scanner is present!)
+    # scan_bytes = scan_document(0)
+    # with open("scanned_image.jpg", "wb") as f:
+    #     f.write(scan_bytes)
+
+    # Usual Flask app startup
     host = os.environ.get('HOST', '0.0.0.0')
     port = int(os.environ.get('PORT', 6001))
     debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    
     print(f"Starting Flask OMR Application on {host}:{port}")
-    print(f"Platform: {platform.system()}")
-    print(f"Debug mode: {debug}")
+    app.run(host=host, port=port, debug=debug)
+
     
-    # Use Flask's built-in server (works on all platforms)
+   # Use Flask's built-in server (works on all platforms)
   #  app.run(host=host, port=port, debug=debug)
