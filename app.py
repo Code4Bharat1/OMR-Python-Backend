@@ -29,7 +29,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for Next.js frontend
+CORS(app, resources={r"/*": {"origins": ["https://admin.neet720.com", "https://neet720.com", "http://localhost:3000", "http://localhost:3001"]}})
 
 # Production configuration
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(16))
@@ -523,6 +523,88 @@ def process_omr_enhanced(image_bytes):
 def health_check():
     """Health check endpoint for monitoring"""
     return jsonify({'status': 'healthy', 'service': 'OMR Processing API'}), 200
+
+@app.route('/api/process-omr-key', methods=['POST'])
+def process_omr_key():
+    """
+    API endpoint for answer key OMR (the correct answers)
+    """
+    try:
+        if 'omransfile' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        file = request.files['omrfile']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff'}
+        if not ('.' in file.filename and file.filename.rsplit('.', 1)[1].lower() in allowed_extensions):
+            return jsonify({'error': 'Invalid file type. Please upload an image file.'}), 400
+
+        image_bytes = file.read()
+        results, img_bytes, total_questions_processed = process_omr_enhanced(image_bytes)
+
+        # Build answer key dict: {question_number: correct_option}
+        answer_key = {}
+        for r in results:
+            q = r['question']
+            if r['marked']:
+                answer_key[q] = r['option']  # Only one correct per question in answer key OMR
+
+        processed_image_base64 = base64.b64encode(img_bytes).decode('utf-8')
+        return jsonify({
+            'success': True,
+            'answer_key': answer_key,
+            'raw_results': results,
+            'questions_detected': total_questions_processed,
+            'processed_image': processed_image_base64,
+            'message': 'Answer key OMR processed successfully'
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error processing answer key OMR: {str(e)}")
+        return jsonify({'success': False, 'error': str(e), 'message': 'Failed to process answer key OMR'}), 500
+
+
+@app.route('/api/process-omr-sheet', methods=['POST'])
+def process_omr_sheet():
+    """
+    API endpoint for student/question OMR (the responses to be checked)
+    """
+    try:
+        if 'omrfile' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        file = request.files['omrfile']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff'}
+        if not ('.' in file.filename and file.filename.rsplit('.', 1)[1].lower() in allowed_extensions):
+            return jsonify({'error': 'Invalid file type. Please upload an image file.'}), 400
+
+        image_bytes = file.read()
+        results, img_bytes, total_questions_processed = process_omr_enhanced(image_bytes)
+
+        # Build response dict: {question_number: selected_option}
+        responses = {}
+        for r in results:
+            q = r['question']
+            if r['marked']:
+                # In case of multiple marked per question, you may want a list, but let's assume one for now
+                responses[q] = r['option']
+
+        processed_image_base64 = base64.b64encode(img_bytes).decode('utf-8')
+        return jsonify({
+            'success': True,
+            'responses': responses,
+            'raw_results': results,
+            'questions_detected': total_questions_processed,
+            'processed_image': processed_image_base64,
+            'message': 'Student/question OMR processed successfully'
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error processing student/question OMR: {str(e)}")
+        return jsonify({'success': False, 'error': str(e), 'message': 'Failed to process student/question OMR'}), 500
+
+
 
 @app.route('/api/process-omr', methods=['POST'])
 def process_omr_api():
