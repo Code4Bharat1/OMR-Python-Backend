@@ -16,6 +16,7 @@ import uuid
 import base64
 import platform
 
+
 # Only import portalocker and fcntl on non-Windows systems
 if platform.system() != 'Windows':
     try:
@@ -54,160 +55,296 @@ if not app.config['DEBUG']:
     app.logger.setLevel(logging.INFO)
 
     app.logger.info('OMR Application startup')
+
+
 def detect_scanners():
     """
-    Detect available scanners on the system
-    Returns a list of scanner information
+    Improved: Detect available scanners on the system (Windows TWAIN)
+    Returns a list of scanner information, handles errors gracefully.
     """
+    import platform
     scanners = []
-    
     try:
         # Windows TWAIN scanner detection
-        if platform.system() == 'Windows' and TWAIN_AVAILABLE:
+        if platform.system() == 'Windows':
             try:
+                import twain
                 sm = twain.SourceManager(0)
                 sources = sm.GetSourceList()
-                
-                for source_name in sources:
+                if not sources:
+                    logger.info("No TWAIN scanners detected.")
+                    return []
+                for idx, source_name in enumerate(sources):
+                    scanner_info = {
+                        'id': idx,
+                        'name': source_name,
+                        'driver': 'TWAIN',
+                        'platform': 'Windows',
+                        'status': 'Available',
+                        'supported_formats': ['JPEG', 'PNG', 'TIFF', 'BMP'],
+                        'max_resolution': 600,  # Default
+                        'color_modes': ['Color', 'Grayscale', 'Black & White'],
+                        'paper_sizes': ['A4', 'Letter', 'Legal', 'Custom']
+                    }
                     try:
                         source = sm.OpenSource(source_name)
-                        caps = source.GetCapability(twain.ICAP_SUPPORTEDSIZES)
-                        
-                        scanner_info = {
-                            'id': len(scanners),
-                            'name': source_name,
-                            'driver': 'TWAIN',
-                            'platform': 'Windows',
-                            'status': 'Available',
-                            'supported_formats': ['JPEG', 'PNG', 'TIFF', 'BMP'],
-                            'max_resolution': 600,  # Default assumption
-                            'color_modes': ['Color', 'Grayscale', 'Black & White'],
-                            'paper_sizes': ['A4', 'Letter', 'Legal', 'Custom']
-                        }
-                        
-                        # Try to get more detailed capabilities
+                        # Try to get the supported resolutions
                         try:
-                            resolution_caps = source.GetCapability(twain.ICAP_XRESOLUTION)
-                            if resolution_caps:
-                                scanner_info['max_resolution'] = max(resolution_caps)
-                        except:
-                            pass
-                        
+                            xres = source.GetCapability(twain.ICAP_XRESOLUTION)
+                            if xres:
+                                scanner_info['max_resolution'] = max(xres)
+                        except Exception as e:
+                            logger.warning(f"Could not get max resolution for {source_name}: {e}")
+
+                        # Try to get supported color modes
+                        try:
+                            colormodes = source.GetCapability(twain.ICAP_PIXELTYPE)
+                            color_mode_map = {0: 'Black & White', 1: 'Grayscale', 2: 'Color'}
+                            if colormodes:
+                                scanner_info['color_modes'] = [color_mode_map.get(mode, str(mode)) for mode in colormodes if mode in color_mode_map]
+                        except Exception as e:
+                            logger.warning(f"Could not get color modes for {source_name}: {e}")
+
+                        # Try to get supported paper sizes
+                        try:
+                            sizes = source.GetCapability(twain.ICAP_SUPPORTEDSIZES)
+                            paper_size_map = {
+                                0: 'None', 1: 'A4', 2: 'A5', 3: 'B4', 4: 'B5',
+                                5: 'US Letter', 6: 'US Legal', 7: 'A6', 8: 'C4', 9: 'C5', 10: 'C6'
+                            }
+                            if sizes:
+                                scanner_info['paper_sizes'] = [paper_size_map.get(s, str(s)) for s in sizes]
+                        except Exception as e:
+                            logger.warning(f"Could not get paper sizes for {source_name}: {e}")
                         scanners.append(scanner_info)
-                        source.RequestAcquire(0, 0)  # Close source
-                        
+                        source.RequestAcquire(0, 0)  # Close source properly
                     except Exception as e:
-                        logger.warning(f"Could not get details for scanner {source_name}: {e}")
-                        # Add basic info even if details fail
+                        logger.warning(f"Could not open scanner {source_name}: {e}")
                         scanners.append({
-                            'id': len(scanners),
+                            'id': idx,
                             'name': source_name,
                             'driver': 'TWAIN',
                             'platform': 'Windows',
-                            'status': 'Available',
+                            'status': 'Error',
                             'supported_formats': ['JPEG', 'PNG'],
                             'max_resolution': 300,
                             'color_modes': ['Color', 'Grayscale'],
                             'paper_sizes': ['A4', 'Letter']
                         })
-                
+            except ImportError:
+                logger.error("TWAIN library not installed. Please install twain module for scanner detection on Windows.")
             except Exception as e:
                 logger.error(f"TWAIN scanner detection failed: {e}")
-        
-        # Linux SANE scanner detection
-        if platform.system() == 'Linux' and SANE_AVAILABLE:
-            try:
-                sane.init()
-                devices = sane.get_devices()
-                
-                for device in devices:
-                    try:
-                        dev_name, manufacturer, model, dev_type = device
-                        
-                        scanner_info = {
-                            'id': len(scanners),
-                            'name': f"{manufacturer} {model}",
-                            'device_name': dev_name,
-                            'manufacturer': manufacturer,
-                            'model': model,
-                            'type': dev_type,
-                            'driver': 'SANE',
-                            'platform': 'Linux',
-                            'status': 'Available',
-                            'supported_formats': ['JPEG', 'PNG', 'TIFF', 'PNM'],
-                            'max_resolution': 600,
-                            'color_modes': ['Color', 'Grayscale', 'Lineart'],
-                            'paper_sizes': ['A4', 'Letter', 'Legal', 'Custom']
-                        }
-                        
-                        # Try to open device to get more details
-                        try:
-                            dev = sane.open(dev_name)
-                            opts = dev.get_options()
-                            
-                            # Extract resolution info
-                            for opt in opts:
-                                if opt and 'resolution' in opt.name.lower():
-                                    if hasattr(opt, 'constraint') and opt.constraint:
-                                        if isinstance(opt.constraint, (list, tuple)):
-                                            scanner_info['max_resolution'] = max(opt.constraint)
-                                        elif isinstance(opt.constraint, (int, float)):
-                                            scanner_info['max_resolution'] = opt.constraint
-                            
-                            dev.close()
-                            
-                        except Exception as e:
-                            logger.warning(f"Could not get detailed info for {dev_name}: {e}")
-                        
-                        scanners.append(scanner_info)
-                        
-                    except Exception as e:
-                        logger.warning(f"Error processing SANE device {device}: {e}")
-                
-                sane.exit()
-                
-            except Exception as e:
-                logger.error(f"SANE scanner detection failed: {e}")
-        
-        # macOS scanner detection (basic)
-        if platform.system() == 'Darwin':
-            try:
-                # Check for common scanner applications/drivers
-                import subprocess
-                
-                # Try to detect scanners through system_profiler
-                result = subprocess.run(['system_profiler', 'SPUSBDataType'], 
-                                      capture_output=True, text=True, timeout=10)
-                
-                if result.returncode == 0:
-                    lines = result.stdout.split('\n')
-                    for line in lines:
-                        if any(keyword in line.lower() for keyword in ['scanner', 'scan', 'canon', 'epson', 'hp']):
-                            if 'scanner' in line.lower() or 'scan' in line.lower():
-                                scanner_name = line.strip().split(':')[0] if ':' in line else line.strip()
-                                
-                                scanner_info = {
-                                    'id': len(scanners),
-                                    'name': scanner_name,
-                                    'driver': 'System',
-                                    'platform': 'macOS',
-                                    'status': 'Available',
-                                    'supported_formats': ['JPEG', 'PNG', 'TIFF', 'PDF'],
-                                    'max_resolution': 600,
-                                    'color_modes': ['Color', 'Grayscale'],
-                                    'paper_sizes': ['A4', 'Letter', 'Legal']
-                                }
-                                scanners.append(scanner_info)
-                
-            except Exception as e:
-                logger.warning(f"macOS scanner detection failed: {e}")
-        
-    except Exception as e:
-        logger.error(f"Scanner detection failed: {e}")
-    
+        else:
+            logger.info("Scanner detection is implemented for Windows (TWAIN) only in this function.")
+    except Exception as ex:
+        logger.error(f"General error in scanner detection: {ex}")
+
     return scanners
 
+
 def scan_document(scanner_id, scan_settings=None):
+    """
+    Scan a document using the specified scanner
+    Returns the scanned image as bytes
+    """
+    try:
+        scanners = detect_scanners()
+        
+        if scanner_id >= len(scanners):
+            raise ValueError(f"Invalid scanner ID: {scanner_id}")
+        
+        scanner = scanners[scanner_id]
+        
+        # Default scan settings
+        default_settings = {
+            'resolution': 300,
+            'color_mode': 'Color',
+            'paper_size': 'A4',
+            'format': 'JPEG',
+            'brightness': 50,
+            'contrast': 50
+        }
+        
+        if scan_settings:
+            default_settings.update(scan_settings)
+        
+        logger.info(f"Scanning with {scanner['name']} using settings: {default_settings}")
+        
+        # Windows TWAIN scanning
+        if platform.system() == 'Windows' and TWAIN_AVAILABLE and scanner['driver'] == 'TWAIN':
+            try:
+                sm = twain.SourceManager(0)
+                source = sm.OpenSource(scanner['name'])
+                
+                # Set scan parameters
+                source.SetCapability(twain.ICAP_XRESOLUTION, default_settings['resolution'])
+                source.SetCapability(twain.ICAP_YRESOLUTION, default_settings['resolution'])
+                
+                # Set color mode
+                if default_settings['color_mode'] == 'Color':
+                    source.SetCapability(twain.ICAP_PIXELTYPE, twain.TWPT_RGB)
+                elif default_settings['color_mode'] == 'Grayscale':
+                    source.SetCapability(twain.ICAP_PIXELTYPE, twain.TWPT_GRAY)
+                else:
+                    source.SetCapability(twain.ICAP_PIXELTYPE, twain.TWPT_BW)
+                
+                # Perform scan
+                source.RequestAcquire(0, 0)
+                rv = source.XferImageNatively()
+                
+                if rv:
+                    (handle, count) = rv
+                    # Convert handle to image bytes
+                    # This is a simplified version - actual implementation depends on TWAIN library
+                    image_data = twain.DIBToBMFile(handle)
+                    twain.GlobalFree(handle)
+                    return image_data
+                
+            except Exception as e:
+                logger.error(f"TWAIN scanning failed: {e}")
+                raise ValueError(f"Scanning failed: {e}")
+        
+        # Linux SANE scanning
+        if platform.system() == 'Linux' and SANE_AVAILABLE and scanner['driver'] == 'SANE':
+            try:
+                sane.init()
+                device = sane.open(scanner['device_name'])
+                
+                # Set scan parameters
+                device.resolution = default_settings['resolution']
+                
+                if default_settings['color_mode'] == 'Color':
+                    device.mode = 'color'
+                elif default_settings['color_mode'] == 'Grayscale':
+                    device.mode = 'gray'
+                else:
+                    device.mode = 'lineart'
+                
+                # Perform scan
+                device.start()
+                image_data = device.snap()
+                device.close()
+                sane.exit()
+                
+                # Convert PIL image to bytes
+                if isinstance(image_data, Image.Image):
+                    img_byte_arr = io.BytesIO()
+                    image_data.save(img_byte_arr, format=default_settings['format'])
+                    return img_byte_arr.getvalue()
+                
+            except Exception as e:
+                logger.error(f"SANE scanning failed: {e}")
+                raise ValueError(f"Scanning failed: {e}")
+        
+        # If no specific driver worked, return error
+        raise ValueError(f"Scanning not supported for {scanner['driver']} on {platform.system()}")
+        
+    except Exception as e:
+        logger.error(f"Document scanning failed: {e}")
+        raise ValueError(f"Document scanning failed: {e}")
+
+
+
+def enhance_qr_image(img):
+    """Enhanced QR code preprocessing for better detection."""
+    # Convert to grayscale if needed
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img.copy()
+    
+    # Apply multiple enhancement techniques
+    enhanced_images = []
+    
+    # 1. CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    clahe_enhanced = clahe.apply(gray)
+    enhanced_images.append(cv2.cvtColor(clahe_enhanced, cv2.COLOR_GRAY2BGR))
+    
+    # 2. Gaussian blur + sharpening
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    sharpening_kernel = np.array([[-1,-1,-1],
+                                  [-1, 9,-1],
+                                  [-1,-1,-1]])
+    sharpened = cv2.filter2D(blurred, -1, sharpening_kernel)
+    enhanced_images.append(cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR))
+    
+    # 3. Morphological operations to clean up
+    kernel = np.ones((2,2), np.uint8)
+    morph = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+    morph = cv2.morphologyEx(morph, cv2.MORPH_OPEN, kernel)
+    enhanced_images.append(cv2.cvtColor(morph, cv2.COLOR_GRAY2BGR))
+    
+    # 4. Adaptive thresholding
+    adaptive_thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                          cv2.THRESH_BINARY, 11, 2)
+    enhanced_images.append(cv2.cvtColor(adaptive_thresh, cv2.COLOR_GRAY2BGR))
+    
+    # 5. Simple thresholding with Otsu
+    _, otsu_thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    enhanced_images.append(cv2.cvtColor(otsu_thresh, cv2.COLOR_GRAY2BGR))
+    
+    # 6. Histogram equalization
+    hist_eq = cv2.equalizeHist(gray)
+    enhanced_images.append(cv2.cvtColor(hist_eq, cv2.COLOR_GRAY2BGR))
+    
+    # 7. Original with noise reduction
+    denoised = cv2.fastNlMeansDenoising(gray)
+    enhanced_images.append(cv2.cvtColor(denoised, cv2.COLOR_GRAY2BGR))
+    
+    return enhanced_images
+
+def get_qr_regions(img):
+    """Get multiple potential QR code regions from the image."""
+    height, width = img.shape[:2]
+    regions = []
+    
+    # Standard positions for OMR sheets
+    positions = [
+        # Top-right corner (most common)
+        (int(width * 0.75), 0, width, int(height * 0.18)),
+        (int(width * 0.70), 0, width, int(height * 0.20)),
+        (int(width * 0.80), 0, width, int(height * 0.15)),
+        (int(width * 0.72), int(height * 0.01), width, int(height * 0.17)),
+        
+        # Top-left corner
+        (0, 0, int(width * 0.25), int(height * 0.18)),
+        (0, 0, int(width * 0.30), int(height * 0.20)),
+        
+        # Bottom-right corner
+        (int(width * 0.75), int(height * 0.82), width, height),
+        (int(width * 0.70), int(height * 0.80), width, height),
+        
+        # Bottom-left corner
+        (0, int(height * 0.82), int(width * 0.25), height),
+        (0, int(height * 0.80), int(width * 0.30), height),
+        
+        # Center regions (if QR is placed unusually)
+        (int(width * 0.35), int(height * 0.35), int(width * 0.65), int(height * 0.65)),
+        
+        # Header center
+        (int(width * 0.35), 0, int(width * 0.65), int(height * 0.15)),
+        
+        # Full width header (for very wide QR placements)
+        (0, 0, width, int(height * 0.12)),
+        (0, 0, width, int(height * 0.18)),
+    ]
+    
+    for (x1, y1, x2, y2) in positions:
+        # Ensure coordinates are within image bounds
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(width, x2), min(height, y2)
+        
+        if x2 > x1 and y2 > y1:  # Valid region
+            region = img[y1:y2, x1:x2]
+            if region.size > 0:  # Non-empty region
+                regions.append(region)
+    
+    return regions
+
+
+def scan_document_omr(scanner_id, scan_settings=None):
     """
     Scan a document using the specified scanner
     Returns the scanned image as bytes
@@ -890,24 +1027,129 @@ def scan_qr():
     try:
         if 'file' not in request.files:
             return jsonify({'success': False, 'error': 'No file uploaded'}), 400
-
+        
         file = request.files['file']
         file_bytes = np.frombuffer(file.read(), np.uint8)
         img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-
-        # Use OpenCV QRCodeDetector
+        
+        if img is None:
+            return jsonify({'success': False, 'error': 'Failed to decode image'}), 400
+        
         detector = cv2.QRCodeDetector()
-        data, bbox, _ = detector.detectAndDecode(img)
-
-        if data:
-            return jsonify({'success': True, 'qr_data': data}), 200
+        qr_data = None
+        best_confidence = 0
+        detection_info = {
+            'angle': 0,
+            'scale': 1.0,
+            'region': 'unknown',
+            'enhancement': 'none'
+        }
+        
+        # Get potential QR regions
+        qr_regions = get_qr_regions(img)
+        
+        # Also try full image as fallback
+        qr_regions.append(img)
+        
+        # Test different scales
+        scales = [1.0, 1.5, 2.0, 2.5, 3.0, 0.8, 1.2]
+        
+        # Test different rotation angles
+        angles = [0, -1, 1, -2, 2, -3, 3, -5, 5, -7, 7, -10, 10, -15, 15, 90, 180, 270]
+        
+        region_idx = 0
+        for region in qr_regions:
+            region_idx += 1
+            
+            if region.size == 0:
+                continue
+                
+            # Try different scales
+            for scale in scales:
+                if scale != 1.0:
+                    scaled_region = cv2.resize(region, None, fx=scale, fy=scale, 
+                                             interpolation=cv2.INTER_CUBIC)
+                else:
+                    scaled_region = region.copy()
+                
+                # Get enhanced versions of the image
+                enhanced_images = enhance_qr_image(scaled_region)
+                
+                # Try each enhancement
+                for enh_idx, enhanced in enumerate(enhanced_images):
+                    enhancement_names = ['clahe', 'sharpened', 'morphological', 
+                                       'adaptive_thresh', 'otsu_thresh', 'hist_eq', 'denoised']
+                    
+                    # Try different angles
+                    for angle in angles:
+                        if angle != 0:
+                            center = (enhanced.shape[1] // 2, enhanced.shape[0] // 2)
+                            M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                            # Add padding to avoid cutting off rotated content
+                            cos_val = abs(M[0, 0])
+                            sin_val = abs(M[0, 1])
+                            new_width = int((enhanced.shape[0] * sin_val) + (enhanced.shape[1] * cos_val))
+                            new_height = int((enhanced.shape[0] * cos_val) + (enhanced.shape[1] * sin_val))
+                            M[0, 2] += (new_width / 2) - center[0]
+                            M[1, 2] += (new_height / 2) - center[1]
+                            
+                            rotated = cv2.warpAffine(enhanced, M, (new_width, new_height), 
+                                                   borderMode=cv2.BORDER_CONSTANT, 
+                                                   borderValue=(255, 255, 255))
+                        else:
+                            rotated = enhanced.copy()
+                        
+                        # Try to detect QR code
+                        data, bbox, straight_qrcode = detector.detectAndDecode(rotated)
+                        
+                        if data and len(data.strip()) > 0:
+                            # Calculate confidence based on bbox area (larger = better)
+                            if bbox is not None and len(bbox) > 0:
+                                area = cv2.contourArea(bbox)
+                                confidence = area
+                            else:
+                                confidence = len(data)  # Use data length as fallback
+                            
+                            if confidence > best_confidence:
+                                qr_data = data.strip()
+                                best_confidence = confidence
+                                detection_info = {
+                                    'angle': angle,
+                                    'scale': scale,
+                                    'region': f'region_{region_idx}',
+                                    'enhancement': enhancement_names[enh_idx] if enh_idx < len(enhancement_names) else 'unknown'
+                                }
+                                
+                                # If we found a very confident detection, break early
+                                if confidence > 10000:  # Arbitrary threshold for "good enough"
+                                    break
+                    
+                    if qr_data and best_confidence > 10000:
+                        break
+                if qr_data and best_confidence > 10000:
+                    break
+            if qr_data and best_confidence > 10000:
+                break
+        
+        if qr_data:
+            return jsonify({
+                'success': True, 
+                'qr_data': qr_data,
+                'detection_info': detection_info,
+                'confidence': float(best_confidence)
+            }), 200
         else:
-            return jsonify({'success': False, 'error': 'No QR code detected'}), 200
-
+            return jsonify({
+                'success': False, 
+                'error': 'No QR code detected after comprehensive scan',
+                'attempted_regions': len(qr_regions),
+                'attempted_enhancements': 7,
+                'attempted_angles': len(angles),
+                'attempted_scales': len(scales)
+            }), 200
+            
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
+        return jsonify({'success': False, 'error': f'Processing error: {str(e)}'}), 500
 
 @app.route('/api/process-omr', methods=['POST'])
 def process_omr_api():
