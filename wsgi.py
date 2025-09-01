@@ -44,7 +44,7 @@ def create_production_server():
         cleanup_interval=cleanup_interval,
         channel_timeout=channel_timeout,
         max_request_header_size=8192,
-        max_request_body_size=20 * 1024 * 1024  # 20MB
+        max_request_body_size=200 * 1024 * 1024  # 20MB
     )
 
 if __name__ == '__main__':

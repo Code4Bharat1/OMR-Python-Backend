@@ -11,3 +11,5 @@ waitress==2.1.2
 Flask-CORS==4.0.0
 pyzbar
 pipwin
+PyMuPDF 
+pdf2image

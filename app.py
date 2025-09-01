@@ -1,3 +1,4 @@
+from pdf2image import convert_from_path
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import cv2
@@ -15,6 +16,9 @@ import secrets
 import uuid
 import base64
 import platform
+from io import BytesIO
+import fitz 
+import tempfile
 
 
 # Only import portalocker and fcntl on non-Windows systems
@@ -34,13 +38,19 @@ CORS(app, resources={r"/*": {"origins": ["https://admin.neet720.com", "https://n
 
 # Production configuration
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(16))
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 16MB max file size
 app.config['UPLOAD_FOLDER'] = os.environ.get('UPLOAD_FOLDER', 'uploads')
-app.config['DEBUG'] = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Create upload directory
 UPLOAD_FOLDER = app.config['UPLOAD_FOLDER']
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+try:
+    import fitz  # PyMuPDF
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
 
 # Setup logging for production
 if not app.config['DEBUG']:
@@ -56,6 +66,57 @@ if not app.config['DEBUG']:
 
     app.logger.info('OMR Application startup')
 
+
+def convert_pdf_to_images(pdf_bytes, max_pages=500):
+    """
+    Convert PDF pages to images for OMR processing
+    Returns list of image bytes for each page
+    """
+    if not PDF_SUPPORT:
+        raise ValueError("PDF processing requires PyMuPDF. Install with: pip install PyMuPDF")
+    
+    try:
+        # Open PDF from bytes
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        # Limit pages to maximum
+        total_pages = len(pdf_document)
+        pages_to_process = min(total_pages, max_pages)
+        
+        logger.info(f"Converting {pages_to_process} pages from PDF (total: {total_pages})")
+        
+        image_list = []
+        
+        for page_num in range(pages_to_process):
+            try:
+                # Get page
+                page = pdf_document[page_num]
+                
+                # Convert to image with high DPI for better OMR detection
+                mat = fitz.Matrix(2.0, 2.0)  # 2x scaling for 144 DPI
+                pix = page.get_pixmap(matrix=mat)
+                
+                # Convert to PIL Image
+                img_data = pix.tobytes("png")
+                image_list.append(img_data)
+                
+                logger.info(f"Converted page {page_num + 1}/{pages_to_process}")
+                
+            except Exception as e:
+                logger.error(f"Error converting page {page_num + 1}: {e}")
+                continue
+        
+        pdf_document.close()
+        
+        if not image_list:
+            raise ValueError("No pages could be converted from PDF")
+        
+        logger.info(f"Successfully converted {len(image_list)} pages from PDF")
+        return image_list
+        
+    except Exception as e:
+        logger.error(f"PDF conversion error: {e}")
+        raise ValueError(f"Failed to convert PDF: {e}")
 
 def detect_scanners():
     """
@@ -952,128 +1013,116 @@ def scan_qr():
             return jsonify({'success': False, 'error': 'No file uploaded'}), 400
         
         file = request.files['file']
-        file_bytes = np.frombuffer(file.read(), np.uint8)
-        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
         
-        if img is None:
-            return jsonify({'success': False, 'error': 'Failed to decode image'}), 400
-        
-        detector = cv2.QRCodeDetector()
-        qr_data = None
-        best_confidence = 0
-        detection_info = {
-            'angle': 0,
-            'scale': 1.0,
-            'region': 'unknown',
-            'enhancement': 'none'
-        }
-        
-        # Get potential QR regions
-        qr_regions = get_qr_regions(img)
-        
-        # Also try full image as fallback
-        qr_regions.append(img)
-        
-        # Test different scales
-        scales = [1.0, 1.5, 2.0, 2.5, 3.0, 0.8, 1.2]
-        
-        # Test different rotation angles
-        angles = [0, -1, 1, -2, 2, -3, 3, -5, 5, -7, 7, -10, 10, -15, 15, 90, 180, 270]
-        
-        region_idx = 0
-        for region in qr_regions:
-            region_idx += 1
+        # Check if the file is a PDF
+        if file.filename.lower().endswith('.pdf'):
+            # Save PDF to temporary file first
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+                temp_file.write(file.read())
+                temp_file.flush()
+                
+                from pdf2image import convert_from_path
+                images = convert_from_path(temp_file.name)
             
-            if region.size == 0:
-                continue
-                
-            # Try different scales
-            for scale in scales:
-                if scale != 1.0:
-                    scaled_region = cv2.resize(region, None, fx=scale, fy=scale, 
-                                             interpolation=cv2.INTER_CUBIC)
-                else:
-                    scaled_region = region.copy()
-                
-                # Get enhanced versions of the image
-                enhanced_images = enhance_qr_image(scaled_region)
-                
-                # Try each enhancement
-                for enh_idx, enhanced in enumerate(enhanced_images):
-                    enhancement_names = ['clahe', 'sharpened', 'morphological', 
-                                       'adaptive_thresh', 'otsu_thresh', 'hist_eq', 'denoised']
-                    
-                    # Try different angles
-                    for angle in angles:
-                        if angle != 0:
-                            center = (enhanced.shape[1] // 2, enhanced.shape[0] // 2)
-                            M = cv2.getRotationMatrix2D(center, angle, 1.0)
-                            # Add padding to avoid cutting off rotated content
-                            cos_val = abs(M[0, 0])
-                            sin_val = abs(M[0, 1])
-                            new_width = int((enhanced.shape[0] * sin_val) + (enhanced.shape[1] * cos_val))
-                            new_height = int((enhanced.shape[0] * cos_val) + (enhanced.shape[1] * sin_val))
-                            M[0, 2] += (new_width / 2) - center[0]
-                            M[1, 2] += (new_height / 2) - center[1]
-                            
-                            rotated = cv2.warpAffine(enhanced, M, (new_width, new_height), 
-                                                   borderMode=cv2.BORDER_CONSTANT, 
-                                                   borderValue=(255, 255, 255))
-                        else:
-                            rotated = enhanced.copy()
-                        
-                        # Try to detect QR code
-                        data, bbox, straight_qrcode = detector.detectAndDecode(rotated)
-                        
-                        if data and len(data.strip()) > 0:
-                            # Calculate confidence based on bbox area (larger = better)
-                            if bbox is not None and len(bbox) > 0:
-                                area = cv2.contourArea(bbox)
-                                confidence = area
-                            else:
-                                confidence = len(data)  # Use data length as fallback
-                            
-                            if confidence > best_confidence:
-                                qr_data = data.strip()
-                                best_confidence = confidence
-                                detection_info = {
-                                    'angle': angle,
-                                    'scale': scale,
-                                    'region': f'region_{region_idx}',
-                                    'enhancement': enhancement_names[enh_idx] if enh_idx < len(enhancement_names) else 'unknown'
-                                }
-                                
-                                # If we found a very confident detection, break early
-                                if confidence > 10000:  # Arbitrary threshold for "good enough"
-                                    break
-                    
-                    if qr_data and best_confidence > 10000:
-                        break
-                if qr_data and best_confidence > 10000:
-                    break
-            if qr_data and best_confidence > 10000:
-                break
-        
-        if qr_data:
+            # Clean up temp file
+            os.unlink(temp_file.name)
+            
+            # Process each page of the PDF (each page is treated as a separate image)
+            all_qr_results = []
+            for page_idx, image in enumerate(images):
+                img_byte_arr = io.BytesIO()
+                image.save(img_byte_arr, format='PNG')
+                img_bytes = img_byte_arr.getvalue()
+
+                # Process QR code on this page
+                results = process_qr_on_image(img_bytes)
+                all_qr_results.append({
+                    'page': page_idx + 1,
+                    'qr_data': results['qr_data'],
+                    'detection_info': results['detection_info'],
+                    'confidence': results['confidence']
+                })
+
             return jsonify({
-                'success': True, 
-                'qr_data': qr_data,
-                'detection_info': detection_info,
-                'confidence': float(best_confidence)
+                'success': True,
+                'results': all_qr_results,
+                'message': 'QR codes processed successfully from PDF'
             }), 200
+        
+        # If it's not a PDF, process it as an image file
         else:
-            return jsonify({
-                'success': False, 
-                'error': 'No QR code detected after comprehensive scan',
-                'attempted_regions': len(qr_regions),
-                'attempted_enhancements': 7,
-                'attempted_angles': len(angles),
-                'attempted_scales': len(scales)
-            }), 200
+            # Read file bytes for image processing
+            file.seek(0)  # Reset file pointer since we might have read it above
+            file_bytes = file.read()
             
+            # Convert to numpy array for cv2
+            file_bytes_np = np.frombuffer(file_bytes, np.uint8)
+            img = cv2.imdecode(file_bytes_np, cv2.IMREAD_COLOR)
+
+            if img is None:
+                return jsonify({'success': False, 'error': 'Failed to decode image'}), 400
+
+            # Process QR code on the image
+            results = process_qr_on_image(file_bytes)
+
+            return jsonify({
+                'success': True,
+                'qr_data': results['qr_data'],
+                'detection_info': results['detection_info'],
+                'confidence': results['confidence']
+            }), 200
+
     except Exception as e:
         return jsonify({'success': False, 'error': f'Processing error: {str(e)}'}), 500
 
+def process_qr_on_image(image_bytes):
+    # QR processing logic for individual images (QR detection, enhancements)
+    detector = cv2.QRCodeDetector()
+    qr_data = None
+    best_confidence = 0
+    detection_info = {
+        'angle': 0,
+        'scale': 1.0,
+        'region': 'unknown',
+        'enhancement': 'none'
+    }
+
+    img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+
+    if img is None:
+        return {'qr_data': None, 'detection_info': detection_info, 'confidence': 0}
+
+    # Process QR code as done in the scan_qr function (scales, enhancements, angles)
+    qr_regions = get_qr_regions(img)
+    qr_regions.append(img)
+    scales = [1.0, 1.5, 2.0, 2.5, 3.0, 0.8, 1.2]
+    angles = [0, -1, 1, -2, 2, -3, 3, -5, 5, -7, 7, -10, 10, -15, 15, 90, 180, 270]
+
+    # Try different scales, angles, etc.
+    for region in qr_regions:
+        for scale in scales:
+            if scale != 1.0:
+                region = cv2.resize(region, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            enhanced_images = enhance_qr_image(region)
+            for enhanced in enhanced_images:
+                for angle in angles:
+                    if angle != 0:
+                        center = (enhanced.shape[1] // 2, enhanced.shape[0] // 2)
+                        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                        rotated = cv2.warpAffine(enhanced, M, (enhanced.shape[1], enhanced.shape[0]), borderMode=cv2.BORDER_CONSTANT)
+                    else:
+                        rotated = enhanced.copy()
+
+                    data, bbox, straight_qrcode = detector.detectAndDecode(rotated)
+                    if data:
+                        confidence = cv2.contourArea(bbox) if bbox is not None else len(data)
+                        if confidence > best_confidence:
+                            qr_data = data.strip()
+                            best_confidence = confidence
+                            detection_info = {'angle': angle, 'scale': scale}
+
+    return {'qr_data': qr_data, 'detection_info': detection_info, 'confidence': best_confidence}
 
 @app.route('/api/process-omr-key', methods=['POST'])
 def process_omr_key():
@@ -1081,39 +1130,86 @@ def process_omr_key():
     API endpoint for answer key OMR (the correct answers)
     """
     try:
-        if 'omransfile' not in request.files:
+        if 'omrfile' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
         file = request.files['omrfile']
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
-        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff'}
+        
+        # Validate file type
+        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'pdf'}
         if not ('.' in file.filename and file.filename.rsplit('.', 1)[1].lower() in allowed_extensions):
-            return jsonify({'error': 'Invalid file type. Please upload an image file.'}), 400
+            return jsonify({'error': 'Invalid file type. Please upload an image file or PDF.'}), 400
+        
+        # Read file bytes first
+        file_bytes = file.read()
+        
+        # Check if the file is a PDF
+        if file.filename.lower().endswith('.pdf'):
+            # Convert PDF to images using PyMuPDF
+            image_list = convert_pdf_to_images(file_bytes, max_pages=500)
+            
+            all_results = []
+            all_processed_images = []
+            
+            # Process each page
+            for page_idx, image_bytes in enumerate(image_list):
+                try:
+                    results, img_bytes, total_questions_processed = process_omr_enhanced(image_bytes)
+                    
+                    # Build answer key dict: {question_number: correct_option}
+                    answer_key = {}
+                    for r in results:
+                        q = r['question']
+                        if r['marked']:
+                            answer_key[q] = r['option']
+                    
+                    all_results.append({
+                        'page': page_idx + 1,
+                        'answer_key': answer_key,
+                        'raw_results': results,
+                        'total_questions_processed': total_questions_processed
+                    })
+                    
+                    processed_image_base64 = base64.b64encode(img_bytes).decode('utf-8')
+                    all_processed_images.append(processed_image_base64)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing page {page_idx + 1}: {e}")
+                    continue
+            
+            return jsonify({
+                'success': True,
+                'results': all_results,
+                'processed_images': all_processed_images,
+                'total_pages_processed': len(all_results),
+                'message': 'OMR answer key processed successfully from PDF'
+            }), 200
+        
+        # If it's an image file, process it as usual
+        else:
+            results, img_bytes, total_questions_processed = process_omr_enhanced(file_bytes)
 
-        image_bytes = file.read()
-        results, img_bytes, total_questions_processed = process_omr_enhanced(image_bytes)
+            # Build answer key dict: {question_number: correct_option}
+            answer_key = {}
+            for r in results:
+                q = r['question']
+                if r['marked']:
+                    answer_key[q] = r['option']
 
-        # Build answer key dict: {question_number: correct_option}
-        answer_key = {}
-        for r in results:
-            q = r['question']
-            if r['marked']:
-                answer_key[q] = r['option']  # Only one correct per question in answer key OMR
-
-        processed_image_base64 = base64.b64encode(img_bytes).decode('utf-8')
-        return jsonify({
-            'success': True,
-            'answer_key': answer_key,
-            'raw_results': results,
-            'questions_detected': total_questions_processed,
-            'processed_image': processed_image_base64,
-            'message': 'Answer key OMR processed successfully'
-        }), 200
+            processed_image_base64 = base64.b64encode(img_bytes).decode('utf-8')
+            return jsonify({
+                'success': True,
+                'answer_key': answer_key,
+                'raw_results': results,
+                'questions_detected': total_questions_processed,
+                'processed_image': processed_image_base64,
+                'message': 'Answer key OMR processed successfully'
+            }), 200
 
     except Exception as e:
         logger.error(f"Error processing answer key OMR: {str(e)}")
         return jsonify({'success': False, 'error': str(e), 'message': 'Failed to process answer key OMR'}), 500
-
 
 @app.route('/api/process-omr-sheet', methods=['POST'])
 def process_omr_sheet():
@@ -1126,42 +1222,78 @@ def process_omr_sheet():
         file = request.files['omrfile']
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
-        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff'}
+        
+        # Validate file type
+        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'pdf'}
         if not ('.' in file.filename and file.filename.rsplit('.', 1)[1].lower() in allowed_extensions):
-            return jsonify({'error': 'Invalid file type. Please upload an image file.'}), 400
+            return jsonify({'error': 'Invalid file type. Please upload an image file or PDF.'}), 400
+        
+        # Read file bytes first
+        file_bytes = file.read()
+        
+        # Check if the file is a PDF
+        if file.filename.lower().endswith('.pdf'):
+            # Convert PDF to images using PyMuPDF
+            image_list = convert_pdf_to_images(file_bytes, max_pages=500)
+            
+            all_results = []
+            all_processed_images = []
+            
+            # Process each page
+            for page_idx, image_bytes in enumerate(image_list):
+                try:
+                    results, img_bytes, total_questions_processed = process_omr_enhanced(image_bytes)
+                    responses = {r['question']: r['option'] for r in results if r['marked']}
+                    all_results.append({
+                        'page': page_idx + 1,
+                        'responses': responses,
+                        'total_questions_processed': total_questions_processed
+                    })
+                    
+                    processed_image_base64 = base64.b64encode(img_bytes).decode('utf-8')
+                    all_processed_images.append(processed_image_base64)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing page {page_idx + 1}: {e}")
+                    continue
+            
+            return jsonify({
+                'success': True,
+                'results': all_results,
+                'processed_images': all_processed_images,
+                'total_pages_processed': len(all_results),
+                'message': 'OMR sheet processed successfully from PDF'
+            }), 200
+        
+        # If it's an image file, process it as usual
+        else:
+            results, img_bytes, total_questions_processed = process_omr_enhanced(file_bytes)
 
-        image_bytes = file.read()
-        results, img_bytes, total_questions_processed = process_omr_enhanced(image_bytes)
-
-        # Build response dict: {question_number: selected_option}
-        responses = {}
-        for r in results:
-            q = r['question']
-            if r['marked']:
-                # In case of multiple marked per question, you may want a list, but let's assume one for now
-                responses[q] = r['option']
-
-        processed_image_base64 = base64.b64encode(img_bytes).decode('utf-8')
-        return jsonify({
-            'success': True,
-            'responses': responses,
-            'raw_results': results,
-            'questions_detected': total_questions_processed,
-            'processed_image': processed_image_base64,
-            'message': 'Student/question OMR processed successfully'
-        }), 200
+            # Build response dict: {question_number: selected_option}
+            responses = {r['question']: r['option'] for r in results if r['marked']}
+            processed_image_base64 = base64.b64encode(img_bytes).decode('utf-8')
+            
+            return jsonify({
+                'success': True,
+                'responses': responses,
+                'raw_results': results,
+                'questions_detected': total_questions_processed,
+                'processed_image': processed_image_base64,
+                'message': 'Student/question OMR processed successfully'
+            }), 200
 
     except Exception as e:
         logger.error(f"Error processing student/question OMR: {str(e)}")
         return jsonify({'success': False, 'error': str(e), 'message': 'Failed to process student/question OMR'}), 500
 
 
+
 @app.route('/api/process-omr', methods=['POST'])
 def process_omr_api():
     """
     API endpoint to process OMR sheets
-    Expects: multipart/form-data with 'omrfile' field
-    Returns: JSON with results, summary, and base64 encoded processed image
+    Expects: multipart/form-data with 'omrfile' field (could be a PDF or image)
+    Returns: JSON with results, summary, and base64 encoded processed images for all sheets
     """
     try:
         # Check if file is in request
@@ -1172,50 +1304,83 @@ def process_omr_api():
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
         
-        # Validate file type
-        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff'}
-        if not ('.' in file.filename and file.filename.rsplit('.', 1)[1].lower() in allowed_extensions):
-            return jsonify({'error': 'Invalid file type. Please upload an image file.'}), 400
+        # Read the file bytes
+        file_bytes = file.read()
+
+        # If the file is a PDF, convert it to images
+        if file.filename.lower().endswith('.pdf'):
+            # Convert the PDF to images in-memory
+            from pdf2image import convert_from_path
+            images = convert_from_path(BytesIO(file_bytes))  # Using BytesIO to read in-memory file
+            all_results = []
+            all_processed_images = []
+            
+            # Process each page of the PDF (each OMR sheet)
+            for page_idx, image in enumerate(images):
+                # Save the page as bytes for further processing
+                img_byte_arr = BytesIO()
+                image.save(img_byte_arr, format='PNG')
+                image_bytes = img_byte_arr.getvalue()
+                
+                # Process the OMR sheet (bubble detection, skew correction, etc.)
+                results, img_bytes, total_questions_processed = process_omr_enhanced(image_bytes)
+                
+                # Append the results for each sheet
+                all_results.append({
+                    'page': page_idx + 1,
+                    'results': results,
+                    'total_questions_processed': total_questions_processed
+                })
+                
+                # Collect base64 encoded processed image
+                processed_image_base64 = base64.b64encode(img_bytes).decode('utf-8')
+                all_processed_images.append(processed_image_base64)
+            
+            # Return results for all pages (OMR sheets)
+            return jsonify({
+                'success': True,
+                'results': all_results,
+                'processed_images': all_processed_images,
+                'message': 'OMR sheets processed successfully from PDF'
+            }), 200
         
-        # Read image bytes
-        image_bytes = file.read()
-        
-        # Process with enhanced detection
-        results, img_bytes, total_questions_processed = process_omr_enhanced(image_bytes)
-        
-        # Generate summary
-        marked_bubbles = len(results)
-        questions_answered = len(set(r['question'] for r in results))
-        expected_questions = 180
-        
-        completion_rate = (questions_answered / expected_questions) * 100
-        detection_rate = (total_questions_processed / expected_questions) * 100
-        
-        summary = {
-            'total_questions_processed': int(total_questions_processed),
-            'marked_bubbles': int(marked_bubbles),
-            'questions_answered': int(questions_answered),
-            'expected_questions': expected_questions,
-            'unanswered_questions': int(expected_questions - questions_answered),
-            'completion_rate': f"{completion_rate:.1f}%",
-            'detection_rate': f"{detection_rate:.1f}%",
-            'processing_method': "Enhanced Detection with Skew Correction",
-            'accuracy_score': f"{min(100, detection_rate):.1f}%"
-        }
-        
-        # Convert processed image to base64
-        processed_image_base64 = base64.b64encode(img_bytes).decode('utf-8')
-        
-        logger.info(f"Successfully processed OMR API request: {summary}")
-        
-        return jsonify({
-            'success': True,
-            'results': results,
-            'summary': summary,
-            'processed_image': processed_image_base64,
-            'message': 'OMR sheet processed successfully'
-        }), 200
-        
+        # If it's an image file, process it as usual (same as before)
+        else:
+            results, img_bytes, total_questions_processed = process_omr_enhanced(file_bytes)
+            
+            # Generate summary
+            marked_bubbles = len(results)
+            questions_answered = len(set(r['question'] for r in results))
+            expected_questions = 180
+            
+            completion_rate = (questions_answered / expected_questions) * 100
+            detection_rate = (total_questions_processed / expected_questions) * 100
+            
+            summary = {
+                'total_questions_processed': int(total_questions_processed),
+                'marked_bubbles': int(marked_bubbles),
+                'questions_answered': int(questions_answered),
+                'expected_questions': expected_questions,
+                'unanswered_questions': int(expected_questions - questions_answered),
+                'completion_rate': f"{completion_rate:.1f}%",
+                'detection_rate': f"{detection_rate:.1f}%",
+                'processing_method': "Enhanced Detection with Skew Correction",
+                'accuracy_score': f"{min(100, detection_rate):.1f}%"
+            }
+            
+            # Convert processed image to base64
+            processed_image_base64 = base64.b64encode(img_bytes).decode('utf-8')
+            
+            logger.info(f"Successfully processed OMR API request: {summary}")
+            
+            return jsonify({
+                'success': True,
+                'results': results,
+                'summary': summary,
+                'processed_image': processed_image_base64,
+                'message': 'OMR sheet processed successfully'
+            }), 200
+
     except Exception as e:
         logger.error(f"Error processing OMR API request: {str(e)}")
         return jsonify({
@@ -1223,7 +1388,6 @@ def process_omr_api():
             'error': str(e),
             'message': 'Failed to process OMR sheet'
         }), 500
-
 
 @app.route('/api/process-omr-base64', methods=['POST'])
 def process_omr_base64():
